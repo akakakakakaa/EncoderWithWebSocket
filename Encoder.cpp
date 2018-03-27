@@ -197,8 +197,10 @@ EncoderError Encoder::initialize(EncoderContext mEncCtx, void* opaque, int (*enc
 
 	av_dump_format(fmtCtx, 0, eCtx.filePath.c_str(), 1);
 
+	cout << "write header" << endl;
 	if(avformat_write_header(fmtCtx, &dict) < 0)
 		return WRITE_HEADER_ERROR;	
+	cout << "write header end" << endl;
 
 	return SUCCESS;
 }

@@ -114,7 +114,7 @@ static Encoder encoder;
 static WebSocketServer server;
 static ClientList clientList;
 static int firstCount=0;
-static uint8_t header[1000];
+static uint8_t header[10000];
 static int headerSize=0;
 static void (*clbStateCallback)(enum ClbState);
 static boost::shared_mutex sharedMtx;
@@ -178,7 +178,7 @@ void sendVideoPktAll(uint8_t* buf, int size) {
 }
 
 int readPacket(void* opaque, uint8_t* buf, int size) {
-	//printf("packet size is %d\n", size);
+	printf("packet size is %d\n", size);
 	WebSocketServer* server = (WebSocketServer*)opaque;
 	if(firstCount < 2) {
 		memcpy(header+headerSize, buf, size);
@@ -444,7 +444,7 @@ void startEncoder(ClbContext mClbCtx) {
 		eCtx.videoCodecName = "none";
 	
 	if(clbCtx.isAudioEnabled) {
-		eCtx.audioCodecName = "aac";
+		eCtx.audioCodecName = "libfdk_aac";
 		switch(clbCtx.inSmpFmt) {
 		case SMP_FMT_S16:
 			eCtx.inSmpFmt = AV_SAMPLE_FMT_S16;
@@ -453,7 +453,7 @@ void startEncoder(ClbContext mClbCtx) {
 			eCtx.inSmpFmt = AV_SAMPLE_FMT_S32;
 			break;
 		}
-		eCtx.outSmpFmt = AV_SAMPLE_FMT_FLTP;
+		eCtx.outSmpFmt = AV_SAMPLE_FMT_S16;
 		eCtx.samplerate = clbCtx.samplerate;
 		eCtx.channels = clbCtx.channels;
 		switch(eCtx.channels) {
@@ -469,7 +469,14 @@ void startEncoder(ClbContext mClbCtx) {
 	else
 		eCtx.audioCodecName = "none";
 
-	encoder.initialize(eCtx, (void*)&server, &readPacket);
+	switch(encoder.initialize(eCtx, (void*)&server, &readPacket)) {
+	case SUCCESS:
+		cout << "start encoder success" << endl;
+		break;
+	default:
+		cout << "error occured" << endl;
+		break;
+	}
 }
 
 
