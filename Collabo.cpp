@@ -118,7 +118,6 @@ static uint8_t header[10000];
 static int headerSize=0;
 static void (*clbStateCallback)(enum ClbState);
 static boost::shared_mutex sharedMtx;
-static boost::mutex encoderMtx;
 
 void sendVideoInitMsg(uWS::WebSocket<uWS::SERVER>* ws) {
         //identifier, width, height, header
@@ -169,17 +168,32 @@ void sendVideoPktAll(uint8_t* buf, int size) {
         memcpy(msg + 1, &current, sizeof(long));
         memcpy(msg + 1 + sizeof(long), buf, size);
 
+	struct timespec start, end;
+	//clock_gettime(CLOCK_MONOTONIC_RAW, &start);
 	WSType& wsType = clientList.get<0>();
 	for(WSType::iterator it = wsType.begin(); it != wsType.end(); ++it)
 		if((*it).role != -1)
 			(*it).ws->send(msg, 1 + sizeof(long) + size, uWS::OpCode::BINARY);
+	//clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+	//uint64_t diffUsec = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_nsec - start.tv_nsec) / 1000;
+	//cout << "diffUsec is " << diffUsec << endl;
 
         delete[] msg;
 }
 
+struct timespec b_start,b_end;
+int b_size = 0;
 int readPacket(void* opaque, uint8_t* buf, int size) {
-	printf("packet size is %d\n", size);
-	WebSocketServer* server = (WebSocketServer*)opaque;
+	clock_gettime(CLOCK_MONOTONIC_RAW, &b_end);
+	b_size+=size;
+	uint64_t diffUsec = (b_end.tv_sec - b_start.tv_sec) * 1000000 + (b_end.tv_nsec - b_start.tv_nsec) / 1000;
+	if(diffUsec >= 1000000) {
+		clock_gettime(CLOCK_MONOTONIC_RAW, &b_start);
+		printf("b_size is %d\n", b_size);
+		b_size = 0;
+	}
+	//printf("packet size is %d\n", size);
+	//WebSocketServer* server = (WebSocketServer*)opaque;
 	if(firstCount < 2) {
 		memcpy(header+headerSize, buf, size);
 		headerSize += size;
@@ -191,6 +205,19 @@ int readPacket(void* opaque, uint8_t* buf, int size) {
 		sendVideoPktAll(buf, size);
 	
 	return size;
+}
+
+void encoderStateCallback(EncoderState state) {
+	switch(state) {
+	case SUCCESS:
+		break;
+	case ALREADY_STOP_ERROR:
+		break;
+	default:
+		cout << "error occured. error number is " << state << endl;
+		clbStateCallback(STOP_PROGRAM);
+		break;
+	}
 }
 
 void clbStart(int port,
@@ -210,11 +237,12 @@ void clbStart(int port,
 
 	std::function<void(uWS::WebSocket<uWS::SERVER>*)> onOpenPtr =
 	[&](uWS::WebSocket<uWS::SERVER>* ws) -> void {
-		boost::unique_lock<boost::shared_mutex> lock(sharedMtx);
+		boost::unique_lock<boost::shared_mutex> lock(sharedMtx);		
 
 		Client client(ws);
 		clientList.insert(client);	
 
+		clock_gettime(CLOCK_MONOTONIC_RAW, &b_start);
 		if(clientList.size() == 1)
 			clbStateCallback(START_ENCODING);
 	};
@@ -369,8 +397,10 @@ void clbStart(int port,
 						}
 
 					client.ws->send(connectedList, 1 + mcodeSizes + customSizes + 10*clientList.size(), uWS::OpCode::BINARY);
-					stopEncoder();
-					startEncoder(clbCtx);
+					//stopEncoder();
+					//startEncoder(clbCtx);
+					if(firstCount == 2)
+						sendVideoInitMsg(client.ws);
 					delete connectedList;
 				}
 				else
@@ -418,8 +448,7 @@ void clbStop(void) {
 }
 
 //stop 및 initialize, encodeVideo, encodeAudio는 thread safe하게 코딩하였으므로, mutex를 신경쓸 필요 없음
-void startEncoder(ClbContext mClbCtx) {
-	boost::lock_guard<boost::mutex> guard(encoderMtx);
+void startEncoder(ClbContext mClbCtx, uint8_t* (*requestVideoCallback)(int*,int*)) {
 	clbCtx = mClbCtx;
 
 	firstCount = 0;
@@ -438,7 +467,7 @@ void startEncoder(ClbContext mClbCtx) {
 		eCtx.height = clbCtx.height;
 		eCtx.framerate = clbCtx.fps;
 		eCtx.keyFramerate = 128;
-		eCtx.videoBitrate = 1024*512;
+		eCtx.videoBitrate = 1024*128;
 	}
 	else
 		eCtx.videoCodecName = "none";
@@ -464,12 +493,13 @@ void startEncoder(ClbContext mClbCtx) {
 			eCtx.channel_layout = AV_CH_LAYOUT_STEREO;
 			break;
 		}
-		eCtx.audioBitrate = 1024*100;
+		eCtx.audioBitrate = 1024*128;
+		eCtx.isSilent = clbCtx.isSilent;
 	}
 	else
 		eCtx.audioCodecName = "none";
 
-	switch(encoder.initialize(eCtx, (void*)&server, &readPacket)) {
+	switch(encoder.initialize(eCtx, NULL, &readPacket, &encoderStateCallback, requestVideoCallback)) {
 	case SUCCESS:
 		cout << "start encoder success" << endl;
 		break;
@@ -479,24 +509,27 @@ void startEncoder(ClbContext mClbCtx) {
 	}
 }
 
-
 void stopEncoder(void) {
-	boost::lock_guard<boost::mutex> guard(encoderMtx);
-	encoder.stop();
-}
-
-void encodeVideo(uint8_t* data, int size) {
-	if(!encoder.isStop()) {
-		EncoderError err = encoder.encodeVideo(data, size);
-		if(err != SUCCESS)
-			printf("encode video error occured. error is %d\n");
+	switch(encoder.stop()) {
+	case ALREADY_STOP_ERROR:
+		cout << "encoder already stopped" << endl;
+		break;
+	case SUCCESS:
+		cout << "encoder stopped" << endl;
+		break;
 	}
 }
 
-void encodeAudio(uint8_t* data, int size) {
-	if(!encoder.isStop()) {
-		EncoderError err = encoder.encodeAudio(data, size);
-		if(err != SUCCESS)
-			printf("encode audio error occured. error is %d\n");
-	}
+/*
+bool encodeVideo(uint8_t* data, int size) {
+	return encoder.encodeVideo(data, size);
+}
+*/
+
+void setSilent(bool silent) {
+	encoder.setSilent(silent);
+}
+
+bool encodeAudio(uint8_t* data, int size) {
+	return encoder.encodeAudio(data, size);
 }

@@ -2,8 +2,10 @@
 #include <iostream>
 #include <string>
 #include <functional>
+#include <thread>
 #include <boost/thread/locks.hpp>
 #include <boost/thread/shared_mutex.hpp>
+#include "EncoderCQ.hpp"
 extern "C" {
 #include <libavutil/avutil.h>
 #include <libavcodec/avcodec.h>
@@ -15,7 +17,7 @@ extern "C" {
 using namespace std;
 
 #define IO_BUFFER_SIZE 4096
-enum EncoderError {
+enum EncoderState {
 SUCCESS,
 FORMAT_CONTEXT_ERROR,
 WRITE_HEADER_ERROR,
@@ -52,9 +54,9 @@ ENCODER_STOPPED
 };
 
 struct EncoderContext {
-        std::string filePath;
-        std::string videoCodecName;
-        std::string audioCodecName;
+        string filePath;
+        string videoCodecName;
+        string audioCodecName;
         int width;
         int height;
         int framerate;
@@ -68,22 +70,53 @@ struct EncoderContext {
         int samplerate;
         uint64_t channel_layout;
         int channels;
+	bool isSilent;
 };
 
 class Encoder {
 public:
 	Encoder();
 	~Encoder();
-	EncoderError initialize(EncoderContext eCtx, void* opaque, int (*encodedPacketCallback)(void*, uint8_t*, int));
-	EncoderError stop();
+	EncoderState initialize(EncoderContext eCtx, void* opaque, int (*encodedPacketCallback)(void*, uint8_t*, int), void (*encoderStateCallback)(EncoderState), uint8_t* (*requestVideoCallback)(int*,int*));
+	EncoderState stop();
 	bool isStop();
-	EncoderError encodeVideo(uint8_t* data, int size);
-	EncoderError encodeAudio(uint8_t* data, int size);
 
+	void setSilent(bool silent);
+	//bool encodeVideo(uint8_t* data, int size);
+	bool encodeAudio(uint8_t* data, int size);
 private:
+	//function
+	void loopStop(EncoderState state);
+	void encodeVideoLoop(uint64_t nano);
+	bool encodeVideo(EncoderElement element);
+	void encodeAudioLoop();
+
+	//variables
+	void (*encStateCallback)(EncoderState);
+
+	//request callback
+	uint8_t* (*requestVideo)(int*,int*);
+
+	//
+	void* opaque;
+	int (*encodedPacketCallback)(void*, uint8_t*, int);
+
 	struct EncoderContext eCtx;
 	AVDictionary* dict;
 
+	//
+	EncoderCQ videoCQ;
+	EncoderCQ audioCQ;
+
+	//
+	thread videoThread;
+	thread audioThread;
+
+	//
+	struct timeval videoSrtTs;
+	struct timeval audioSrtTs;
+
+	//
 	AVFormatContext *fmtCtx;
 	struct SwsContext *swsCtx;
 	struct SwrContext *swrCtx;
@@ -110,7 +143,9 @@ private:
 	int audioPktPts;
 	int remainedAudioSize;
 	AVFrame* audioTmpFrame;
+	int audioBytes;
 
 	boost::shared_mutex encoderMtx;
+	boost::shared_mutex syncMtx;
 	bool stopped;
 };

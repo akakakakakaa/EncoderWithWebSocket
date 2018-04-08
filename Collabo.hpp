@@ -17,13 +17,14 @@ struct ClbContext {
 	int height;
 	int samplerate;
 	int channels;
+	bool isSilent;
 	enum ClbPixFmt inPixFmt;
 	enum ClbPixFmt outPixFmt;
 	enum ClbSmpFmt inSmpFmt;
 	enum ClbPixFmt outSmpFmt;
 };
 
-enum ClbState{START_ENCODING,STOP_ENCODING};
+enum ClbState{START_ENCODING,STOP_ENCODING, STOP_PROGRAM};
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -38,11 +39,13 @@ extern "C" {
 
 	extern void clbStop(void);	
 
-	extern void startEncoder(struct ClbContext mClbCtx);
+	//extern void startEncoder(struct ClbContext mClbCtx);
+	extern void startEncoder(struct ClbContext mClbCtx, uint8_t* (*requestVideoCallback)(int*,int*));
 	extern void stopEncoder(void);
 
-	extern void encodeVideo(uint8_t* data, int size);
-	extern void encodeAudio(uint8_t* data, int size);
+	//extern bool encodeVideo(uint8_t* data, int size);
+	extern void setSilent(bool silent);
+	extern bool encodeAudio(uint8_t* data, int size);
 #ifdef __cplusplus
 }
 #endif
