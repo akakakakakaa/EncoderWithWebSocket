@@ -99,12 +99,7 @@ EncoderState Encoder::initialize(EncoderContext mEncCtx, void* mOpaque, int (*mE
 
 		switch(audioCC->sample_fmt) {
 		case AV_SAMPLE_FMT_U8:
-			audioBytes = 1;
-			break;
-		case AV_SAMPLE_FMT_S16:
-		case AV_SAMPLE_FMT_S16P:
-			audioBytes = 2;
-			break;
+				break;
 		case AV_SAMPLE_FMT_S32:
 		case AV_SAMPLE_FMT_S32P:
 		case AV_SAMPLE_FMT_FLTP:
@@ -141,6 +136,9 @@ EncoderState Encoder::initialize(EncoderContext mEncCtx, void* mOpaque, int (*mE
 		av_dict_set(&dict, "level", "3.1", 0);
 		av_dict_set(&dict, "rc", "vbr", 0);
 		av_dict_set(&dict, "tune", "zerolatency", 0);
+		av_dict_set(&dict, "rc-lookahead", "0", 0);
+		av_dict_set(&dict, "delay", "0", 0);
+		av_dict_set(&dict, "disabled", "0", 0);
 
 		if(avcodec_open2(videoCC, videoCodec, &dict) < 0)
                         return VIDEO_CODEC_OPEN_ERROR;
@@ -214,8 +212,8 @@ EncoderState Encoder::initialize(EncoderContext mEncCtx, void* mOpaque, int (*mE
         ioCtx = avio_alloc_context(ioBuffer, IO_BUFFER_SIZE, 1, opaque, NULL, encodedPacketCallback, NULL);
         fmtCtx->pb = ioCtx;
 
-        //if(avio_open(&fmtCtx->pb, eCtx.filePath.c_str(), AVIO_FLAG_READ_WRITE) < 0)
-        //        return AVIO_OPEN_ERROR;
+        if(avio_open(&fmtCtx->pb, eCtx.filePath.c_str(), AVIO_FLAG_READ_WRITE) < 0)
+                return AVIO_OPEN_ERROR;
 
 	av_dump_format(fmtCtx, 0, eCtx.filePath.c_str(), 1);
 
