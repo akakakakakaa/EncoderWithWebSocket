@@ -12,7 +12,6 @@ enum ClbSmpFmt {
 struct ClbContext {
 	bool isVideoEnabled;
 	bool isAudioEnabled;
-	int fps;
 	int width;
 	int height;
 	int samplerate;
@@ -24,15 +23,11 @@ struct ClbContext {
 	enum ClbPixFmt outSmpFmt;
 };
 
-enum ClbState{START_ENCODING,STOP_ENCODING, STOP_PROGRAM};
+enum ClbState{START_STREAMING,STOP_STREAMING, STOP_PROGRAM};
 #ifdef __cplusplus
 extern "C" {
 #endif
-	extern void initVideo(int width, int height, int fps, int kfps, int bitrate);
-
-	extern void initAudio(int samplerate, int bitrate);
-
-	extern void clbStart(int port,
+	extern void clbStart(int collaboPort, int agentPort, const char* meetSeq, const char* password,
                 	void (*mouseCallback)(int, int, int),
                 	void (*keyboardCallback)(int, bool),
 			void (*stateCallback)(enum ClbState));
@@ -40,8 +35,8 @@ extern "C" {
 	extern void clbStop(void);	
 
 	//extern void startEncoder(struct ClbContext mClbCtx);
-	extern void startEncoder(struct ClbContext mClbCtx, uint8_t* (*requestVideoCallback)(int*,int*));
-	extern void stopEncoder(void);
+	extern void startStreaming(struct ClbContext mClbCtx, uint8_t* (*requestVideoCallback)(int*,int*));
+	extern void stopStreaming(void);
 
 	//extern bool encodeVideo(uint8_t* data, int size);
 	extern void setSilent(bool silent);

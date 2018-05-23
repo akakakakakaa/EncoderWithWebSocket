@@ -10,18 +10,20 @@
 #include <list>
 #include "MySQLConnector.hpp"
 #include "Encoder.hpp"
+#include "JpegCompressor.hpp"
+#include "AgentManager.hpp"
 using namespace std;
 using JSON = nlohmann::json;
 
 #define DEBUG 1
 
 //client to server msg
-enum CTSMSG{MOUSE,KEYBOARD,AUTHORITY,CHIEF,SETTING};
+enum CTSMSG{MOUSE,KEYBOARD,AUTHORITY,CHIEF,SETTING,MODE};
 //server to client msg
-enum STCMSG{INITVIDEO,DECODEVIDEO,AUTHPROCESS,CHIEFPROCESS,REMOTEDESKTOPSETTING,ACCESSMEMBERPROCESS,CONNECTEDMEMBERINFOPROCESS};
+enum STCMSG{INITVIDEO,DECODEVIDEO,INITIMAGE,DECODEIMAGE,AUTHPROCESS,CHIEFPROCESS,ACCESSMEMBERPROCESS,CONNECTEDMEMBERINFOPROCESS};
 
 struct Client {
-        Client(uWS::WebSocket<uWS::SERVER> *_ws) : ws(_ws), chief(false), authority(false), role(-1), mcode(""), mscode(""), custom(""), connectedTime(-1), isFirst(true), isSet(false) {}
+        Client(uWS::WebSocket<uWS::SERVER> *_ws) : ws(_ws), chief(false), authority(false), role(-1), mcode(""), mscode(""), custom(""), name(""), connectedTime(-1), isFirst(true), isSet(false) {}
         uWS::WebSocket<uWS::SERVER> *ws;
         bool chief;
         bool authority;
@@ -29,6 +31,7 @@ struct Client {
         string mcode;
         string mscode;
 	string custom;
+	string name;
         int connectedTime;
         bool isFirst;
         bool isSet;
@@ -86,6 +89,7 @@ struct settingInfo {
 		mcode = client.mcode;
 		mscode = client.mscode;
 		custom = client.custom;
+		name = client.name;
 		role = client.role;
 		authority = client.authority;
 		chief = client.chief;
@@ -95,6 +99,7 @@ struct settingInfo {
 		client.mcode = mcode;
 		client.mscode = mscode;
 		client.custom = custom;
+		client.name = name;
 		client.role = role;
 		client.authority = authority;
 		client.chief = chief;
@@ -104,6 +109,7 @@ private:
         string mcode;
 	string mscode;
 	string custom;
+	string name;
 	int role;
 	bool authority;
 	bool chief;
@@ -111,6 +117,8 @@ private:
 
 static ClbContext clbCtx;
 static Encoder encoder;
+static JpegCompressor compressor;
+static AgentManager manager;
 static WebSocketServer server;
 static ClientList clientList;
 static int firstCount=0;
@@ -118,6 +126,8 @@ static uint8_t header[10000];
 static int headerSize=0;
 static void (*clbStateCallback)(enum ClbState);
 static boost::shared_mutex sharedMtx;
+//0: video, 1: image
+static int mode=1;
 
 void sendVideoInitMsg(uWS::WebSocket<uWS::SERVER>* ws) {
         //identifier, width, height, header
@@ -133,7 +143,9 @@ void sendVideoInitMsg(uWS::WebSocket<uWS::SERVER>* ws) {
         memcpy(msg + 1 + sizeof(long) + sizeof(bool) + sizeof(bool) + sizeof(int), &clbCtx.height, sizeof(int));
         memcpy(msg + 1 + sizeof(long) + sizeof(bool) + sizeof(bool) + sizeof(int) + sizeof(int), header, headerSize);
 
-	ws->send(msg, 1 + sizeof(long) + sizeof(bool) + sizeof(bool) + sizeof(int) + sizeof(int) + headerSize, uWS::OpCode::BINARY);
+	//boost::shared_lock<boost::shared_mutex> lock(sharedMtx);
+	if(ws != NULL)
+		ws->send(msg, 1 + sizeof(long) + sizeof(bool) + sizeof(bool) + sizeof(int) + sizeof(int) + headerSize, uWS::OpCode::BINARY);
         delete[] msg;
 }
 
@@ -151,11 +163,40 @@ void sendVideoInitMsgAll() {
         memcpy(msg + 1 + sizeof(long) + sizeof(bool) + sizeof(bool) + sizeof(int), &clbCtx.height, sizeof(int));
         memcpy(msg + 1 + sizeof(long) + sizeof(bool) + sizeof(bool) + sizeof(int) + sizeof(int), header, headerSize);
 
+	//boost::shared_lock<boost::shared_mutex> lock(sharedMtx);
 	WSType& wsType = clientList.get<0>();
 	for(WSType::iterator it = wsType.begin(); it != wsType.end(); ++it)
 		if((*it).role != -1)
         		(*it).ws->send(msg, 1 + sizeof(long) + sizeof(bool) + sizeof(bool) + sizeof(int) + sizeof(int) + headerSize, uWS::OpCode::BINARY);
         delete[] msg;
+}
+
+void sendImageInit(int width, int height) {
+	printf("sendImageInit start\n");
+	char* msg = new char[1 + sizeof(int)*2];
+	msg[0] = INITIMAGE;
+	memcpy(msg + 1, &width, sizeof(int));
+	memcpy(msg + 1 + sizeof(int), &height, sizeof(int));
+	
+	//boost::shared_lock<boost::shared_mutex> lock(sharedMtx);
+	WSType& wsType = clientList.get<0>();
+	for(WSType::iterator it = wsType.begin(); it != wsType.end(); ++it)
+		if((*it).role != -1)
+			(*it).ws->send(msg, 1 + sizeof(int)*2, uWS::OpCode::BINARY);
+	delete[] msg;
+	printf("sendImageInit end\n");
+}
+
+void sendImage(uint8_t* buf, int size) {
+	buf[0] = DECODEIMAGE;
+
+	//boost::shared_lock<boost::shared_mutex> lock(sharedMtx);
+	WSType& wsType = clientList.get<0>();
+	for(WSType::iterator it = wsType.begin(); it != wsType.end(); ++it)
+		if((*it).role != -1)
+			(*it).ws->send((const char*)buf, size, uWS::OpCode::BINARY);
+
+	delete[] buf;
 }
 
 void sendVideoPktAll(uint8_t* buf, int size) {
@@ -168,8 +209,10 @@ void sendVideoPktAll(uint8_t* buf, int size) {
         memcpy(msg + 1, &current, sizeof(long));
         memcpy(msg + 1 + sizeof(long), buf, size);
 
-	struct timespec start, end;
+	//struct timespec start, end;
 	//clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+
+	//boost::shared_lock<boost::shared_mutex> lock(sharedMtx);
 	WSType& wsType = clientList.get<0>();
 	for(WSType::iterator it = wsType.begin(); it != wsType.end(); ++it)
 		if((*it).role != -1)
@@ -189,7 +232,7 @@ int readPacket(void* opaque, uint8_t* buf, int size) {
 	uint64_t diffUsec = (b_end.tv_sec - b_start.tv_sec) * 1000000 + (b_end.tv_nsec - b_start.tv_nsec) / 1000;
 	if(diffUsec >= 1000000) {
 		clock_gettime(CLOCK_MONOTONIC_RAW, &b_start);
-		printf("b_size is %d\n", b_size);
+		//printf("b_size is %d\n", b_size);
 		b_size = 0;
 	}
 	//printf("packet size is %d\n", size);
@@ -220,7 +263,7 @@ void encoderStateCallback(EncoderState state) {
 	}
 }
 
-void clbStart(int port,
+void clbStart(int collaboPort, int agentPort, const char* meetSeq, const char* password,
 	void (*mouseCallback)(int, int, int),
 	void (*keyboardCallback)(int, bool),
 	void (*stateCallback)(enum ClbState)) {
@@ -228,7 +271,7 @@ void clbStart(int port,
 
 	//setting mysqlContext
 	MySQLContext mCtx;
-	mCtx.ip = "163.180.117.108";
+	mCtx.ip = "163.180.117.201";
 	mCtx.id = "ccubedev";
 	mCtx.pw = "ccube123#";
 	mCtx.schema = "ccbdb";
@@ -244,7 +287,7 @@ void clbStart(int port,
 
 		clock_gettime(CLOCK_MONOTONIC_RAW, &b_start);
 		if(clientList.size() == 1)
-			clbStateCallback(START_ENCODING);
+			clbStateCallback(START_STREAMING);
 	};
 
 	std::function<void(uWS::WebSocket<uWS::SERVER>*, char*, size_t)> onMsgPtr = 
@@ -283,7 +326,9 @@ void clbStart(int port,
 			}
 			case AUTHORITY: {
 				string authDst = json["dst"];
-				if(client.chief && !client.mcode.compare(authDst)) {
+				cout << "auth: " << client.mcode << " to " << authDst << endl;
+				if(client.chief /*&& !client.mcode.compare(authDst)*/) {
+					cout << "ath process" << endl;
 					McodeType& mcodeType = clientList.get<1>();
 					McodeType::iterator mIt = mcodeType.find(authDst);
 
@@ -304,14 +349,15 @@ void clbStart(int port,
 					memcpy(sendData+6, mIt->mcode.c_str(), mcodeSize);
 					for(McodeType::iterator it = mcodeType.begin(); it != mcodeType.end(); ++it)
 						it->ws->send(sendData, 6+mcodeSize, uWS::OpCode::BINARY);
-					delete sendData;
+					delete[] sendData;
 				}
 				break;
 			}
 
 			case CHIEF: {
 				string chiefDst = json["dst"];
-				if(client.chief && !client.mcode.compare(chiefDst)) {
+				cout << "chief: " << client.mcode << " to " << chiefDst << endl;
+				if(client.chief /*&& !client.mcode.compare(chiefDst)*/) {
 					McodeType& mcodeType = clientList.get<1>();
 					McodeType::iterator srcIt = mcodeType.find(client.mcode);
 					McodeType::iterator dstIt = mcodeType.find(chiefDst);
@@ -328,11 +374,11 @@ void clbStart(int port,
 					memcpy(sendData+1, &srcMcodeSize, 4);
 					memcpy(sendData+5, &dstMcodeSize, 4);
 					memcpy(sendData+9, client.mcode.c_str(), srcMcodeSize);
-					memcpy(sendData+9+srcMcodeSize, client.mcode.c_str(), dstMcodeSize);
+					memcpy(sendData+9+srcMcodeSize, chiefDst.c_str(), dstMcodeSize);
 
 					for(McodeType::iterator it = mcodeType.begin(); it != mcodeType.end(); ++it)
-						it->ws->send(sendData, 9+srcMcodeSize, uWS::OpCode::BINARY);
-					delete sendData;
+						it->ws->send(sendData, 9+srcMcodeSize+dstMcodeSize, uWS::OpCode::BINARY);
+					delete[] sendData;
 				}
 				break;
 			}
@@ -341,6 +387,7 @@ void clbStart(int port,
 				client.mcode = json["mcode"];
 				client.mscode = json["mscode"];
 				client.custom = json["custom"];
+				client.name = json["name"];
 
 				if(mysqlConnector.isSuited(
 					client.ws->getAddress().address,
@@ -358,27 +405,32 @@ void clbStart(int port,
 					//alert connected info to others	
 					int cliMcodeSize = client.mcode.size();
 					int cliCustomSize = client.custom.size();
-					char* alertConnect = new char[11 + cliMcodeSize + cliCustomSize];
+					int cliNameSize = client.name.size();
+					char* alertConnect = new char[15 + cliMcodeSize + cliCustomSize + cliNameSize];
 					alertConnect[0] = ACCESSMEMBERPROCESS;
 					memcpy(alertConnect+1, &client.authority, 1);
 					memcpy(alertConnect+2, &client.chief, 1);
 					memcpy(alertConnect+3, &cliMcodeSize, 4);
 					memcpy(alertConnect+7, &cliCustomSize, 4);
-					memcpy(alertConnect+11, client.mcode.c_str(), cliMcodeSize);
-					memcpy(alertConnect+11+cliMcodeSize, client.custom.c_str(), cliCustomSize);
-					server.sendAll(alertConnect, 11 + cliMcodeSize + cliCustomSize);
-					delete alertConnect;
+					memcpy(alertConnect+11, &cliNameSize, 4);
+					memcpy(alertConnect+15, client.mcode.c_str(), cliMcodeSize);
+					memcpy(alertConnect+15+cliMcodeSize, client.custom.c_str(), cliCustomSize);
+					memcpy(alertConnect+15+cliMcodeSize+cliCustomSize, client.name.c_str(), cliNameSize);
+					server.sendAll(alertConnect, 15 + cliMcodeSize + cliCustomSize + cliNameSize);
+					delete[] alertConnect;
 
 					//send other client infos to connected client
 					int mcodeSizes = 0;
 					int customSizes = 0;
+					int nameSizes = 0;
 					for(McodeType::iterator it = mcodeType.begin(); it != mcodeType.end(); ++it)
 						if((*it).role != -1) {
 							mcodeSizes += (*it).mcode.size();
 							customSizes += (*it).custom.size();
+							nameSizes += (*it).name.size();
 						}
 
-					char* connectedList = new char[1+mcodeSizes+customSizes+10*clientList.size()];
+					char* connectedList = new char[1+mcodeSizes+customSizes+nameSizes+14*clientList.size()];
 					connectedList[0] = CONNECTEDMEMBERINFOPROCESS;
 
 					int size = 0;
@@ -387,24 +439,49 @@ void clbStart(int port,
 						if((*it).role != -1) {
 							int mcodeSize = (*it).mcode.size();
 							int customSize = (*it).custom.size();
+							int nameSize = (*it).name.size();
 							memcpy(connectedList+memcpyedSize, &(*it).authority, 1);
 							memcpy(connectedList+memcpyedSize+1, &(*it).chief, 1);
 							memcpy(connectedList+memcpyedSize+2, &mcodeSize, 4);
 							memcpy(connectedList+memcpyedSize+6, &customSize, 4);
-							memcpy(connectedList+memcpyedSize+10, (*it).mcode.c_str(), mcodeSize);
-							memcpy(connectedList+memcpyedSize+10+mcodeSize, (*it).custom.c_str(), customSize);
-							memcpyedSize += 10+mcodeSize+customSize;
+							memcpy(connectedList+memcpyedSize+10, &nameSize, 4);
+							memcpy(connectedList+memcpyedSize+14, (*it).mcode.c_str(), mcodeSize);
+							memcpy(connectedList+memcpyedSize+14+mcodeSize, (*it).custom.c_str(), customSize);
+							memcpy(connectedList+memcpyedSize+14+mcodeSize+customSize, (*it).name.c_str(), nameSize);
+							memcpyedSize += 14+mcodeSize+customSize+nameSize;
 						}
 
-					client.ws->send(connectedList, 1 + mcodeSizes + customSizes + 10*clientList.size(), uWS::OpCode::BINARY);
+					client.ws->send(connectedList, 1 + mcodeSizes + customSizes + nameSizes + 14*clientList.size(), uWS::OpCode::BINARY);
 					//stopEncoder();
 					//startEncoder(clbCtx);
 					if(firstCount == 2)
 						sendVideoInitMsg(client.ws);
-					delete connectedList;
+					if(mode == 1)
+						compressor.sendFull();
+					delete[] connectedList;
 				}
 				else
 					client.ws->terminate();
+				break;
+			}
+                        case MODE: {
+                                string modeStr = json["mode"];
+				if(client.role != -1 && client.chief) {
+					lock.unlock();
+					boost::unique_lock<boost::shared_mutex> lock(sharedMtx);
+					if(modeStr.compare("video") == 0 && mode != 0) {
+						clbStateCallback(STOP_STREAMING);
+						mode = 0;
+						clbStateCallback(START_STREAMING);
+						
+					}
+					else if(modeStr.compare("image") == 0 && mode != 1) {
+						clbStateCallback(STOP_STREAMING);
+						mode = 1;
+						clbStateCallback(START_STREAMING);
+					}
+				}
+
 				break;
 			}
 		}
@@ -418,18 +495,19 @@ void clbStart(int port,
 		clientList.erase(it);
 
 		if(clientList.size() == 0)
-			clbStateCallback(STOP_ENCODING);
+			clbStateCallback(STOP_STREAMING);
 	};
 	
 	bool isSSL = false;
-	if(server.initialize(port, isSSL, onOpenPtr, onMsgPtr, onClosePtr)) {
+	if(server.initialize(collaboPort, isSSL, onOpenPtr, onMsgPtr, onClosePtr)) {
 #ifdef DEBUG
-		cout << "server initialized. port number is " << port << ". SSL is ";
+		cout << "server initialized. port number is " << collaboPort << ". SSL is ";
 		if(isSSL)
 			cout << "enabled" << endl;
 		else
 			cout << "disabled" << endl;
 #endif
+		manager.run(agentPort, meetSeq, password);
 	}
 #ifdef DEBUG
 	else {
@@ -443,20 +521,26 @@ void clbStart(int port,
 }
 
 void clbStop(void) {
-	clbStateCallback(STOP_ENCODING);
+	clbStateCallback(STOP_STREAMING);
 	server.stop();
 }
 
 //stop 및 initialize, encodeVideo, encodeAudio는 thread safe하게 코딩하였으므로, mutex를 신경쓸 필요 없음
-void startEncoder(ClbContext mClbCtx, uint8_t* (*requestVideoCallback)(int*,int*)) {
-	clbCtx = mClbCtx;
+void startStreaming(ClbContext mClbCtx, uint8_t* (*requestVideoCallback)(int*,int*)) {
+	clbCtx = mClbCtx;	
 
 	firstCount = 0;
 	headerSize = 0;
 	EncoderContext eCtx;
-        eCtx.filePath = "test.mp4";
-	if(clbCtx.isVideoEnabled) {
-        	eCtx.videoCodecName = "h264_nvenc";
+	if(mode == 0) {
+		eCtx.filePath="test.mp4";
+		clbCtx.isAudioEnabled = true;
+		eCtx.audioCodecName = "libfdk_aac";		
+
+		clbCtx.isVideoEnabled = true;
+		//eCtx.videoCodecName = "vp8_nvenc";
+		//eCtx.videoCodecName = "h264_nvenc";
+		eCtx.videoCodecName = "libx264";
 		switch(clbCtx.inPixFmt) {
 		case PIX_FMT_R8G8B8:
 			eCtx.inPixFmt = AV_PIX_FMT_RGB24;
@@ -465,51 +549,54 @@ void startEncoder(ClbContext mClbCtx, uint8_t* (*requestVideoCallback)(int*,int*
 		eCtx.outPixFmt = AV_PIX_FMT_YUV420P;
 		eCtx.width = clbCtx.width;
 		eCtx.height = clbCtx.height;
-		eCtx.framerate = clbCtx.fps;
+		eCtx.framerate = 25;
 		eCtx.keyFramerate = 128;
-		eCtx.videoBitrate = 1024*128;
+		eCtx.videoBitrate = 1024*512;		
 	}
-	else
-		eCtx.videoCodecName = "none";
-	
-	if(clbCtx.isAudioEnabled) {
+	else if(mode == 1) {
+		eCtx.filePath="test.mp4";
+		clbCtx.isAudioEnabled = true;
 		eCtx.audioCodecName = "libfdk_aac";
-		switch(clbCtx.inSmpFmt) {
-		case SMP_FMT_S16:
-			eCtx.inSmpFmt = AV_SAMPLE_FMT_S16;
-			break;
-		case SMP_FMT_S32:
-			eCtx.inSmpFmt = AV_SAMPLE_FMT_S32;
-			break;
-		}
-		eCtx.outSmpFmt = AV_SAMPLE_FMT_S16;
-		eCtx.samplerate = clbCtx.samplerate;
-		eCtx.channels = clbCtx.channels;
-		switch(eCtx.channels) {
-		case 1:
-			eCtx.channel_layout = AV_CH_LAYOUT_MONO;
-			break;
-		case 2:
-			eCtx.channel_layout = AV_CH_LAYOUT_STEREO;
-			break;
-		}
-		eCtx.audioBitrate = 1024*128;
-		eCtx.isSilent = clbCtx.isSilent;
+		
+		clbCtx.isVideoEnabled = false;
+		eCtx.videoCodecName = "none";
+		compressor.initialize(25, clbCtx.width, clbCtx.height, 50, &sendImageInit, &sendImage, requestVideoCallback);
 	}
-	else
-		eCtx.audioCodecName = "none";
 
-	switch(encoder.initialize(eCtx, NULL, &readPacket, &encoderStateCallback, requestVideoCallback)) {
+	switch(clbCtx.inSmpFmt) {
+	case SMP_FMT_S16:
+		eCtx.inSmpFmt = AV_SAMPLE_FMT_S16;
+		break;
+	case SMP_FMT_S32:
+		eCtx.inSmpFmt = AV_SAMPLE_FMT_S32;
+		break;
+	}
+	eCtx.outSmpFmt = AV_SAMPLE_FMT_S16;
+	eCtx.samplerate = clbCtx.samplerate;
+	eCtx.channels = clbCtx.channels;
+	switch(eCtx.channels) {
+	case 1:
+		eCtx.channel_layout = AV_CH_LAYOUT_MONO;
+		break;
+	case 2:
+		eCtx.channel_layout = AV_CH_LAYOUT_STEREO;
+		break;
+	}
+	eCtx.audioBitrate = 1024*128;
+	eCtx.isSilent = clbCtx.isSilent;
+	
+	int err = encoder.initialize(eCtx, NULL, &readPacket, &encoderStateCallback, requestVideoCallback);
+	switch(err) {
 	case SUCCESS:
 		cout << "start encoder success" << endl;
 		break;
 	default:
-		cout << "error occured" << endl;
+		cout << "error occured. error number is " << err << endl;
 		break;
 	}
 }
-
-void stopEncoder(void) {
+	
+void stopStreaming(void) {
 	switch(encoder.stop()) {
 	case ALREADY_STOP_ERROR:
 		cout << "encoder already stopped" << endl;
@@ -518,6 +605,8 @@ void stopEncoder(void) {
 		cout << "encoder stopped" << endl;
 		break;
 	}
+	if(mode == 1)
+		compressor.stop();
 }
 
 /*

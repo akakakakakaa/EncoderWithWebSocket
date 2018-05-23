@@ -25,11 +25,12 @@ EncoderCQ::~EncoderCQ() {
 }
 
 void EncoderCQ::clear() {
-	cout << "encodercq clear called" << endl;
-	boost::unique_lock<boost::mutex> lock(mutex);
-	cout << "encodercq clear lock" << endl;
+	//cout << "encodercq clear called" << endl;
+	boost::unique_lock<boost::mutex> enqueueLock(enqueueMtx);
+	boost::unique_lock<boost::mutex> dequeueLock(dequeueMtx);
+	//cout << "encodercq clear lock" << endl;
 
-	cout << "front is : " << front << " rear is : " << rear << endl;
+	//cout << "front is : " << front << " rear is : " << rear << endl;
         if(rear >= front)
                 for(int i=front; i<rear; i++)
                         delete queue[i].data;
@@ -52,8 +53,7 @@ int EncoderCQ::size() {
 }
 
 QUEUE_MSG EncoderCQ::enqueue(EncoderElement element) {
-	boost::unique_lock<boost::mutex> lock(mutex);
-
+	boost::unique_lock<boost::mutex> lock(enqueueMtx);
 	if(isStop)
 		return QUEUE_STOP;	
 
@@ -69,9 +69,8 @@ QUEUE_MSG EncoderCQ::enqueue(EncoderElement element) {
 }
 
 QUEUE_MSG EncoderCQ::dequeue(EncoderElement& element) {
-	boost::unique_lock<boost::mutex> lock(mutex);	
-
 	//cout << "dequeue = " << "front : " << front << " rear : " << rear << endl;
+	boost::unique_lock<boost::mutex> lock(dequeueMtx);
 	if(front == rear) {
 		//cout << "wait" << endl;
 		if(!isWait)
@@ -91,12 +90,12 @@ QUEUE_MSG EncoderCQ::dequeue(EncoderElement& element) {
 }
 
 void EncoderCQ::start() {
-	boost::unique_lock<boost::mutex> lock(mutex);
+	//boost::unique_lock<boost::mutex> lock(mutex);
 	isStop = false;
 }
 
 void EncoderCQ::stop() {
-	boost::unique_lock<boost::mutex> lock(mutex);
+	//boost::unique_lock<boost::mutex> lock(mutex);
 	cond.notify_one();
 	isStop = true;
 }

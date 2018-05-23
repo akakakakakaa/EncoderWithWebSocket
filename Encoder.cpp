@@ -2,6 +2,7 @@
 
 Encoder::Encoder() : videoCQ(true), audioCQ(true) {
 	av_register_all();
+//	av_log_set_level(AV_LOG_DEBUG);
 	stopped = true;
 }
 
@@ -100,6 +101,9 @@ EncoderState Encoder::initialize(EncoderContext mEncCtx, void* mOpaque, int (*mE
 		switch(audioCC->sample_fmt) {
 		case AV_SAMPLE_FMT_U8:
 				break;
+		case AV_SAMPLE_FMT_S16:
+			audioBytes = 2;
+			break;
 		case AV_SAMPLE_FMT_S32:
 		case AV_SAMPLE_FMT_S32P:
 		case AV_SAMPLE_FMT_FLTP:
@@ -131,14 +135,17 @@ EncoderState Encoder::initialize(EncoderContext mEncCtx, void* mOpaque, int (*mE
 	}
 
         if(videoStream) {
-		av_dict_set(&dict, "preset", "llhp", 0);
+		//av_dict_set(&dict, "preset", "llhp", 0);
+		av_dict_set(&dict, "preset", "ultrafast", 0);
 		av_dict_set(&dict, "profile", "main", 0);
 		av_dict_set(&dict, "level", "3.1", 0);
-		av_dict_set(&dict, "rc", "vbr", 0);
+		//av_dict_set(&dict, "movflags", "+frag_keyframe+empty_moov+default_base_moof", 0);
+		//av_dict_set(&dict, "frag_duration", "40", 0);
+		//av_dict_set(&dict, "rc", "vbr", 0);
 		av_dict_set(&dict, "tune", "zerolatency", 0);
-		av_dict_set(&dict, "rc-lookahead", "0", 0);
-		av_dict_set(&dict, "delay", "0", 0);
-		av_dict_set(&dict, "disabled", "0", 0);
+		//av_dict_set(&dict, "rc-lookahead", "0", 0);
+		//av_dict_set(&dict, "delay", "0", 0);
+		//av_dict_set(&dict, "disabled", "0", 0);
 
 		if(avcodec_open2(videoCC, videoCodec, &dict) < 0)
                         return VIDEO_CODEC_OPEN_ERROR;
@@ -199,7 +206,7 @@ EncoderState Encoder::initialize(EncoderContext mEncCtx, void* mOpaque, int (*mE
 			return AUDIO_ALLOC_FRAME_ERROR;
 
 		audioTmpFrame->nb_samples = audioFrame->nb_samples;
-		audioTmpFrame->format = eCtx.inPixFmt;
+		audioTmpFrame->format = audioCC->sample_fmt;
 		audioTmpFrame->channel_layout = audioFrame->channel_layout;
 		audioTmpFrame->sample_rate = audioFrame->sample_rate;
 		printf("tmp nb samples size is %d\n", audioFrame->nb_samples);
@@ -212,13 +219,21 @@ EncoderState Encoder::initialize(EncoderContext mEncCtx, void* mOpaque, int (*mE
         ioCtx = avio_alloc_context(ioBuffer, IO_BUFFER_SIZE, 1, opaque, NULL, encodedPacketCallback, NULL);
         fmtCtx->pb = ioCtx;
 
-        if(avio_open(&fmtCtx->pb, eCtx.filePath.c_str(), AVIO_FLAG_READ_WRITE) < 0)
-                return AVIO_OPEN_ERROR;
+        //if(avio_open(&fmtCtx->pb, eCtx.filePath.c_str(), AVIO_FLAG_READ_WRITE) < 0)
+        //        return AVIO_OPEN_ERROR;
 
 	av_dump_format(fmtCtx, 0, eCtx.filePath.c_str(), 1);
 
+	//av_dict_set(&dict, "preset", "llhp", 0);
+	//av_dict_set(&dict, "profile", "main", 0);
+	//av_dict_set(&dict, "level", "3.1", 0);
 	av_dict_set(&dict, "movflags", "+frag_keyframe+empty_moov+default_base_moof", 0);
 	av_dict_set(&dict, "frag_duration", "40", 0);
+	//av_dict_set(&dict, "rc", "vbr", 0);
+	//av_dict_set(&dict, "tune", "zerolatency", 0);
+	//av_dict_set(&dict, "rc-lookahead", "0", 0);
+	//av_dict_set(&dict, "delay", "0", 0);
+	//av_dict_set(&dict, "disabled", "0", 0);
 	//av_dict_set(&dict, "frag_size", "65536" , 0);	
 
 	if(avformat_write_header(fmtCtx, &dict) < 0)
@@ -227,10 +242,14 @@ EncoderState Encoder::initialize(EncoderContext mEncCtx, void* mOpaque, int (*mE
 	av_dict_free(&dict);
 	dict = NULL;
 	
-	if(eCtx.videoCodecName.compare("none") != 0)
-		videoThread = thread(&Encoder::encodeVideoLoop, this, (uint64_t)(pow(10.0, 9.0) / videoCC->time_base.den));
-	if(eCtx.audioCodecName.compare("none") != 0)
-		audioThread = thread(&Encoder::encodeAudioLoop, this);
+	if(eCtx.videoCodecName.compare("none") != 0 && eCtx.audioCodecName.compare("none") == 0)
+		thread(&Encoder::encodeVideoLoop, this, (uint64_t)(pow(10.0, 9.0) / videoCC->time_base.den), true).detach();
+	if(eCtx.audioCodecName.compare("none") != 0 && eCtx.videoCodecName.compare("none") == 0)
+		thread(&Encoder::encodeAudioLoop, this, 25, true).detach();
+	else {
+		thread(&Encoder::encodeVideoLoop, this, (uint64_t)(pow(10.0, 9.0) / videoCC->time_base.den), false).detach();
+		thread(&Encoder::encodeAudioLoop, this, 25, false).detach();
+	}	
 
 	return SUCCESS;
 }
@@ -241,19 +260,22 @@ EncoderState Encoder::stop() {
 		return ALREADY_STOP_ERROR;	
 
 	stopped = true;
-	if(videoThread.joinable()) {
+	usleep(100000);
+	//if(videoThread.joinable()) {
 		cout << "encoder video thread wait" << endl;
 		videoCQ.stop();
-		videoThread.join();
-		cout << "encoder video join end" << endl;
-	}
+		cout << "encoder videoCQ stop" << endl;
+	//	videoThread.join();
+	//	cout << "encoder video join end" << endl;
+	//}
 	cout << "encoder audio thread joinable" << endl;
-	if(audioThread.joinable()) {
+	//if(audioThread.joinable()) {
 		cout << "encoder audio thread wait" << endl;
 		audioCQ.stop();
-		audioThread.join();
-		cout << "encoder audio thread join end" << endl;
-	}
+		cout << "encoder audioCQ stop" << endl;
+	//	audioThread.join();
+	//	cout << "encoder audio thread join end" << endl;
+	//}
 	cout << "encoder audio check complete" << endl;
 
         av_write_trailer(fmtCtx);
@@ -347,10 +369,10 @@ bool Encoder::isStop() {
 	return stopped;
 }
 
-void Encoder::encodeVideoLoop(uint64_t nano) {
-	cout << "nano is " << nano << endl;
-	while(!stopped) {
-		while(eCtx.isSilent && !stopped) {
+void Encoder::encodeVideoLoop(uint64_t nano, bool onlyVideo) {
+	cout << "nano is " << nano << " " << "Silent is " << eCtx.isSilent << endl;
+	if(onlyVideo) {
+		while(!stopped) {
 			thread([this]() {
 				int width, height;
 				EncoderElement element;
@@ -363,34 +385,62 @@ void Encoder::encodeVideoLoop(uint64_t nano) {
 					initialize(eCtx, opaque, encodedPacketCallback, encStateCallback, requestVideo);
 				}
 
-				EncoderElement audioElement;
-				audioElement.size = audioBytes * audioCC->time_base.den / videoCC->time_base.den;
-				audioElement.data = new uint8_t[audioElement.size];
-				audioElement.fake = true;
-				memset(audioElement.data, 0, audioElement.size);
-				audioCQ.enqueue(audioElement);
-				
-				if(!encodeVideo(element))
-					return;
-			}).detach();
-			this_thread::sleep_for(chrono::nanoseconds(nano));
+                                if(!encodeVideoImpl(element))
+                                        return;
+                        }).detach();
+                        this_thread::sleep_for(chrono::nanoseconds(nano));
 		}
-		
-		videoCQ.start();
-		while(!eCtx.isSilent && !stopped) {
-			EncoderElement element;
-			QUEUE_MSG msg = videoCQ.dequeue(element);
-			if(msg == QUEUE_STOP)
-                        	break;
-		
-			if(!encodeVideo(element))
-				return;
-		}
-		videoCQ.stop();
 	}
+	else {
+		while(!stopped) {
+			while(eCtx.isSilent && !stopped) {
+				//cout << "silent state in video" << endl;
+				thread([this]() {
+					int width, height;
+					EncoderElement element;
+					element.data = requestVideo(&width, &height);
+					element.size = width*height*3;
+					if(width != eCtx.width || height != eCtx.height) {
+						eCtx.width = width;
+						eCtx.height = height;
+						stop();
+						initialize(eCtx, opaque, encodedPacketCallback, encStateCallback, requestVideo);
+					}
+	
+					EncoderElement audioElement;
+					//cout << "audioBytes: " << audioBytes << ", audioCC->time_base.den: " << audioCC->time_base.den << ", videoCC->time_base.den: " << videoCC->time_base.den << endl;
+					audioElement.size = audioBytes * audioCC->time_base.den / videoCC->time_base.den;
+					audioElement.data = new uint8_t[audioElement.size];
+					audioElement.fake = true;
+					memset(audioElement.data, 0, audioElement.size);
+					audioCQ.enqueue(audioElement);
+					
+					if(!encodeVideoImpl(element))
+						return;
+				}).detach();
+				this_thread::sleep_for(chrono::nanoseconds(nano));
+			}
+			
+			//videoCQ.start();
+			while(!eCtx.isSilent && !stopped) {
+				//cout << "not silent state in video" << endl;
+				EncoderElement element;
+				QUEUE_MSG msg = videoCQ.dequeue(element);
+				if(msg == QUEUE_STOP)
+       	                 	break;
+			
+				if(!encodeVideoImpl(element))
+					return;
+			}
+			//cout << "silent state change" << endl;
+			//videoCQ.stop();
+			//cout << "videoCQ stop end" << endl;
+		}
+	}
+	cout << "encode Video Loop end" << endl;
 }
-
-bool Encoder::encodeVideo(EncoderElement element) {
+	
+bool Encoder::encodeVideoImpl(EncoderElement element) {
 	uint8_t* inData[1] = { element.data };
 	int inLineSize[1] = { 3*eCtx.width };
 
@@ -419,7 +469,7 @@ bool Encoder::encodeVideo(EncoderElement element) {
 		//cout << "video time is " << (double)videoPktPts / videoCC->time_base.den << endl;
 
 		av_packet_rescale_ts(videoPkt, videoCC->time_base, videoStream->time_base);
-		cout << "video time is " << videoPkt->pts * 0.000078125 << endl;
+		//cout << "video time is " << videoPkt->pts * 0.000078125 << endl;
 		videoPkt->stream_index = videoStream->index;
 		if(av_interleaved_write_frame(fmtCtx, videoPkt) != 0) {
 			loopStop(VIDEO_WRITE_FRAME_ERROR);
@@ -432,97 +482,15 @@ bool Encoder::encodeVideo(EncoderElement element) {
 	return true;
 }
 
-/*
-bool Encoder::encodeVideo(uint8_t* data, int size) {
-	//cout << "enqueue video" << endl;
-	boost::shared_lock<boost::shared_mutex> lock(encoderMtx);
-	if(stopped)
-		return !stopped;
-
-	//cout << "enqueue video process" << endl;
-	uint8_t* copyData = new uint8_t[size];
-	memcpy(copyData, data, size);
-	
-	QUEUE_MSG msg = videoCQ.enqueue(EncoderElement(copyData, size));
-	if(msg == QUEUE_FULL) {
-		cout << "videoCQ is full!!" << endl;
-		delete copyData;
-	}
-	//cout << "enqueue video end" << endl;
-}
-
-void Encoder::encodeVideoLoop() {
-	videoCQ.start();
-
-	while(!stopped) {
-		EncoderElement element;
-		QUEUE_MSG msg = videoCQ.dequeue(element);
-		if(msg == QUEUE_STOP)
-			break;
-	
-		if(eCtx.isSilent) {
-			EncoderElement audioElement;
-			audioElement.size = audioBytes * audioCC->time_base.den / videoCC->time_base.den;
-			audioElement.data = new uint8_t[audioElement.size];
-			memset(audioElement.data, 0, audioElement.size);
-			audioCQ.enqueue(audioElement);
-		}
-		else {
-			double videoTime = ((double)videoFramePts / videoCC->time_base.den);
-			double audioTime = ((double)audioFramePts / audioCC->time_base.den);
-			double syncDiff = videoTime - audioTime;
-			if(syncDiff > 0.1) {
-				EncoderElement audioElement;
-				audioElement.size = audioBytes * audioCC->time_base.den * syncDiff;
-				audioElement.data = new uint8_t[audioElement.size];
-				memset(audioElement.data, 0, audioElement.size);
-				audioCQ.enqueue(audioElement);
-			}
-		}
-		
-		uint8_t* inData[1] = { element.data };
-		int inLineSize[1] = { 3*eCtx.width };
-	
-        	sws_scale(swsCtx, inData, inLineSize, 0, eCtx.height, videoFrame->data, videoFrame->linesize);
-		delete element.data;
-		videoFrame->pts = videoFramePts;
-		int ret = avcodec_send_frame(videoCC, videoFrame);
-        	if(ret < 0) {
-			loopStop(VIDEO_ENCODE_ERROR);
-			return;
-		}
-		videoFramePts++;
-
-        	while(ret >= 0) {
-                	ret = avcodec_receive_packet(videoCC, videoPkt);
-                	if(ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-                        	break;
-                	else if(ret < 0) {
-				loopStop(VIDEO_RECEIVE_PACKET_ERROR);
-                        	return;
-			}
-
-			videoPkt->duration = 1000 / videoCC->time_base.den;
-			videoPkt->pts = videoPkt->dts = videoPkt->duration * videoPktPts;
-			videoPktPts++;
-			cout << "video time is " << (double)videoPktPts / videoCC->time_base.den << endl;
-			
-			//av_packet_rescale_ts(videoPkt, videoCC->time_base, videoStream->time_base);
-                	videoPkt->stream_index = videoStream->index;
-                	if(av_interleaved_write_frame(fmtCtx, videoPkt) != 0) {
-				loopStop(VIDEO_WRITE_FRAME_ERROR);
-                        	return;
-			}
-	
-			av_packet_unref(videoPkt);
-        	}
-	}
-	videoCQ.clear();
-}
-*/
-
 void Encoder::setSilent(bool silent) {
+	//순서가 맞아야됨
+	if(!silent)
+		videoCQ.start();
+
 	eCtx.isSilent = silent;
+
+	if(silent)
+		videoCQ.stop();
 }
 
 bool Encoder::encodeAudio(uint8_t* data, int size) {
@@ -541,53 +509,83 @@ bool Encoder::encodeAudio(uint8_t* data, int size) {
 	}
 }
 
-void Encoder::encodeAudioLoop() {
+void Encoder::encodeAudioLoop(int fps, bool onlyAudio) {
 	audioCQ.start();
 
-	struct timespec start, end;
-	bool silent = eCtx.isSilent;
-	int64_t videoSyncPts=0;
-	while(!stopped) {
-		EncoderElement element;
-		//silent인 경우, qemu에서 데이터를 주지 않으므로, 임의로 생성해야함
-		//때문에, video와 audio의 sync를 별개로 처리할 경우, 타이밍을 맞추기 어려우므로
-		//video의 타이밍을 이용하여야 함.
-		QUEUE_MSG msg = audioCQ.dequeue(element);
-		if(msg == QUEUE_STOP)
-			break;
+	if(onlyAudio) {
+		uint64_t nano = pow(10.0, 9.0) / fps;
+		while(!stopped) {
+			if(eCtx.isSilent) {
+				thread([&]() {
+					EncoderElement element;
+					element.size = audioBytes * audioCC->time_base.den / fps;
+					element.data = new uint8_t[element.size];
+					element.fake = true;
+					memset(element.data, 0, element.size);
 
-		if(silent != eCtx.isSilent && element.fake != eCtx.isSilent) {
-
-			double videoTime = ((double)videoFramePts / videoCC->time_base.den);
-			double audioTime = ((double)audioFramePts / audioCC->time_base.den);
-                	double syncDiff = videoTime - audioTime;
-	
-			EncoderElement audioElement;
-			audioElement.size = element.size + audioBytes * audioCC->time_base.den * syncDiff;
-			audioElement.data = new uint8_t[audioElement.size];
-			memcpy(audioElement.data, element.data, element.size);
-			memset(audioElement.data + element.size, 0, audioElement.size - element.size);
-			
-			delete element.data;
-			element = audioElement;
-			silent = eCtx.isSilent;
+					encodeAudioImpl(element);
+				}).detach();
+				this_thread::sleep_for(chrono::nanoseconds(nano));		
+			}
+			else {
+				EncoderElement element;
+				//silent인 경우, qemu에서 데이터를 주지 않으므로, 임의로 생성해야함
+				//때문에, video와 audio의 sync를 별개로 처리할 경우, 타이밍을 맞추기 어려우므로
+				//video의 타이밍을 이용하여야 함.
+				QUEUE_MSG msg = audioCQ.dequeue(element);
+				if(msg == QUEUE_STOP)
+					break;
+				
+				encodeAudioImpl(element);
+			}
 		}
-
-		//cout << "audio dequeue" << endl;
-
-		/*
-		audioFrame->data[0] = element.data;
-		audioFrame->nb_samples = element.size;
-		audioFrame->pts = audioFramePts;
-		int ret = avcodec_send_frame(audioCC, audioFrame);
-		if(ret < 0)
-                	return AUDIO_ENCODE_ERROR;
-        	audioFramePts+=size;
-
-        	while(ret >= 0) {
-                	ret = avcodec_receive_packet(audioCC, audioPkt);
-                	if(ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-                        	break;
+		audioCQ.clear();
+	}
+	else {
+		struct timespec start, end;
+		bool silent = eCtx.isSilent;
+		int64_t videoSyncPts=0;
+		while(!stopped) {
+			EncoderElement element;
+			//silent인 경우, qemu에서 데이터를 주지 않으므로, 임의로 생성해야함
+			//때문에, video와 audio의 sync를 별개로 처리할 경우, 타이밍을 맞추기 어려우므로
+			//video의 타이밍을 이용하여야 함.
+			QUEUE_MSG msg = audioCQ.dequeue(element);
+			if(msg == QUEUE_STOP)
+				break;
+			
+			if(silent != eCtx.isSilent && element.fake != eCtx.isSilent) {
+	
+				double videoTime = ((double)videoFramePts / videoCC->time_base.den);
+				double audioTime = ((double)audioFramePts / audioCC->time_base.den);
+       	 	        	double syncDiff = videoTime - audioTime;
+		
+				EncoderElement audioElement;
+				audioElement.size = element.size + audioBytes * audioCC->time_base.den * syncDiff;
+				audioElement.data = new uint8_t[audioElement.size];
+				memcpy(audioElement.data, element.data, element.size);
+				memset(audioElement.data + element.size, 0, audioElement.size - element.size);
+		
+				delete element.data;
+				element = audioElement;
+				silent = eCtx.isSilent;
+			}
+	
+			//cout << "audio dequeue" << endl;
+	
+			/*
+			audioFrame->data[0] = element.data;
+			audioFrame->nb_samples = element.size;
+			audioFrame->pts = audioFramePts;
+			int ret = avcodec_send_frame(audioCC, audioFrame);
+			if(ret < 0)
+				return AUDIO_ENCODE_ERROR;
+			audioFramePts+=size;
+	
+        		while(ret >= 0) {
+                		ret = avcodec_receive_packet(audioCC, audioPkt);
+        	        	if(ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+					break;
                 	else if(ret < 0) {
 				loopStop(AUDIO_RECEIVE_PACKET_ERROR);
                         	return;
@@ -608,83 +606,136 @@ void Encoder::encodeAudioLoop() {
         	}
 		*/
 
-		uint8_t* data = element.data;
-		int size = element.size;
-		int encodedSize = 0;
-		while(encodedSize != size) {
-			int restFrameSize = audioTmpFrame->nb_samples * audioBytes - remainedAudioSize;
-			int restDataSize = size - encodedSize;
-
-			if(restDataSize >= restFrameSize) {
-				memcpy(audioTmpFrame->data[0] + remainedAudioSize, data + encodedSize, restFrameSize);
-				remainedAudioSize = 0;
-				encodedSize += restFrameSize;
-			}
-			else {
-				memcpy(audioTmpFrame->data[0] + remainedAudioSize, data + encodedSize, restDataSize);
-				remainedAudioSize += restDataSize;
-				break;
-			}
-			//cout << "encoded Size is " << encodedSize << endl;	
-
-			//int dstNbSamples = av_rescale_rnd(swr_get_delay(swrCtx, audioCC->sample_rate) + audioTmpFrame->nb_samples,
-			//					audioCC->sample_rate, audioCC->sample_rate, AV_ROUND_UP);
-			//int ret = swr_convert(swrCtx, audioFrame->data, dstNbSamples, (const uint8_t**)audioTmpFrame->data, audioTmpFrame->nb_samples);
-			//if(ret < 0)
-			//	return AUDIO_SWR_CONVERT_ERROR;
-		
-			//cout << "swr_convert" << endl;
-			audioTmpFrame->pts = audioFramePts;
-			if(!eCtx.isSilent) {
-				int64_t syncPts = av_rescale_q(audioFramePts, audioCC->time_base, videoCC->time_base);
-				if(syncPts - videoSyncPts > (int64_t)videoCC->time_base.den / audioCC->time_base.den) {
-					EncoderElement videoElement;
-					int width, height;
-					videoElement.data = requestVideo(&width, &height);
-					videoElement.size = width*height*3;
-					videoCQ.enqueue(videoElement);
-
-					videoSyncPts += (int64_t)videoCC->time_base.den / audioCC->time_base.den;
+			uint8_t* data = element.data;
+			int size = element.size;
+			int encodedSize = 0;
+			while(encodedSize != size) {
+				int restFrameSize = audioTmpFrame->nb_samples * audioBytes - remainedAudioSize;
+				int restDataSize = size - encodedSize;
+				//cout << "restFramesize: " << restFrameSize << ", restDataSize: " << restDataSize << endl;
+	
+				if(restDataSize >= restFrameSize) {
+					memcpy(audioTmpFrame->data[0] + remainedAudioSize, data + encodedSize, restFrameSize);
+					remainedAudioSize = 0;
+					encodedSize += restFrameSize;
 				}
-			}
-			else
-				videoSyncPts = av_rescale_q(audioFramePts, audioCC->time_base, videoCC->time_base);
-
-        		int ret = avcodec_send_frame(audioCC, audioTmpFrame);
-        		if(ret < 0) {
-				loopStop(AUDIO_ENCODE_ERROR);
-                		return;
-			}
-
-			audioFramePts += audioTmpFrame->nb_samples;//dstNbSamples;
-        		while(ret >= 0) {
-                		ret = avcodec_receive_packet(audioCC, audioPkt);
-                		if(ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-                        		break;
-                		else if(ret < 0) {
-					loopStop(AUDIO_RECEIVE_PACKET_ERROR);
-                        		return;
+				else {
+					memcpy(audioTmpFrame->data[0] + remainedAudioSize, data + encodedSize, restDataSize);
+					remainedAudioSize += restDataSize;
+					break;
 				}
-
-				//audioPkt->duration = 1000 * audioTmpFrame->nb_samples / audioCC->time_base.den;
-				//audioPkt->pts = audioPkt->dts = audioPktPts;
-				//audioPktPts += audioTmpFrame->nb_samples;
-				//cout << "audio time is " << (double)audioPktPts / audioCC->time_base.den << endl;
+				//cout << "encoded Size is " << encodedSize << endl;	
+	
+				//int dstNbSamples = av_rescale_rnd(swr_get_delay(swrCtx, audioCC->sample_rate) + audioTmpFrame->nb_samples,
+				//					audioCC->sample_rate, audioCC->sample_rate, AV_ROUND_UP);
+				//int ret = swr_convert(swrCtx, audioFrame->data, dstNbSamples, (const uint8_t**)audioTmpFrame->data, audioTmpFrame->nb_samples);
+				//if(ret < 0)
+				//	return AUDIO_SWR_CONVERT_ERROR;
 			
-				av_packet_rescale_ts(audioPkt, audioCC->time_base, audioStream->time_base);
-	  			cout << "audio time is " << (double)audioPkt->pts / audioCC->time_base.den << endl;
-				audioPkt->stream_index = audioStream->index;	
-				if(av_interleaved_write_frame(fmtCtx, audioPkt) != 0) {
-					loopStop(AUDIO_WRITE_FRAME_ERROR);
-					return;
-				}
+				//cout << "swr_convert" << endl;
+				audioTmpFrame->pts = audioFramePts;
+				if(!eCtx.isSilent) {
+					int64_t syncPts = av_rescale_q(audioFramePts, audioCC->time_base, videoCC->time_base);
+					cout << syncPts << " " << videoSyncPts << endl;
+					if(syncPts != videoSyncPts) {
+						EncoderElement videoElement;
+						int width, height;
+						videoElement.data = requestVideo(&width, &height);
+						videoElement.size = width*height*3;
+						videoCQ.enqueue(videoElement);
 
-                		av_packet_unref(audioPkt);
-        		}
+						videoSyncPts = syncPts;
+					}
+				}
+				else
+					videoSyncPts = av_rescale_q(audioFramePts, audioCC->time_base, videoCC->time_base);
+	
+       	 			int ret = avcodec_send_frame(audioCC, audioTmpFrame);
+       	 			if(ret < 0) {
+					loopStop(AUDIO_ENCODE_ERROR);
+       	         			return;
+				}
+	
+				audioFramePts += audioTmpFrame->nb_samples;//dstNbSamples;
+       	 			while(ret >= 0) {
+       	         			ret = avcodec_receive_packet(audioCC, audioPkt);
+       	   		      		if(ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+       	               	  			break;
+       	         			else if(ret < 0) {
+						loopStop(AUDIO_RECEIVE_PACKET_ERROR);
+       	                 			return;
+					}
+
+					//audioPkt->duration = 1000 * audioTmpFrame->nb_samples / audioCC->time_base.den;
+					//audioPkt->pts = audioPkt->dts = audioPktPts;
+					//audioPktPts += audioTmpFrame->nb_samples;
+					//cout << "audio time is " << (double)audioPktPts / audioCC->time_base.den << endl;
+			
+					av_packet_rescale_ts(audioPkt, audioCC->time_base, audioStream->time_base);
+	  				//cout << "audio time is " << (double)audioPkt->pts / audioCC->time_base.den << endl;
+					audioPkt->stream_index = audioStream->index;	
+					if(av_interleaved_write_frame(fmtCtx, audioPkt) != 0) {
+						loopStop(AUDIO_WRITE_FRAME_ERROR);
+						return;
+					}
+
+                			av_packet_unref(audioPkt);
+        			}
+			}
+			delete data;
 		}
-		delete data;
+		audioCQ.clear();
 	}
-	audioCQ.clear();
+}
+
+void Encoder::encodeAudioImpl(EncoderElement element) {
+        uint8_t* data = element.data;
+        int size = element.size;
+        int encodedSize = 0;
+        while(encodedSize != size) {
+                int restFrameSize = audioTmpFrame->nb_samples * audioBytes - remainedAudioSize;
+                int restDataSize = size - encodedSize;
+                //cout << "restFramesize: " << restFrameSize << ", restDataSize: " << restDataSize << endl;
+
+                if(restDataSize >= restFrameSize) {
+                        memcpy(audioTmpFrame->data[0] + remainedAudioSize, data + encodedSize, restFrameSize);
+                        remainedAudioSize = 0;
+                        encodedSize += restFrameSize;
+                }
+                else {
+                        memcpy(audioTmpFrame->data[0] + remainedAudioSize, data + encodedSize, restDataSize);
+                        remainedAudioSize += restDataSize;
+                        break;
+                }
+
+                audioTmpFrame->pts = audioFramePts;
+                int ret = avcodec_send_frame(audioCC, audioTmpFrame);
+                if(ret < 0) {
+                        loopStop(AUDIO_ENCODE_ERROR);
+                        return;
+                }
+
+                audioFramePts += audioTmpFrame->nb_samples;//dstNbSamples;
+                while(ret >= 0) {
+                        ret = avcodec_receive_packet(audioCC, audioPkt);
+                        if(ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+                                break;
+                        else if(ret < 0) {
+                                loopStop(AUDIO_RECEIVE_PACKET_ERROR);
+                                return;
+                        }
+
+                        av_packet_rescale_ts(audioPkt, audioCC->time_base, audioStream->time_base);
+                        audioPkt->stream_index = audioStream->index;
+                        if(av_interleaved_write_frame(fmtCtx, audioPkt) != 0) {
+                                loopStop(AUDIO_WRITE_FRAME_ERROR);
+                                return;
+                        }
+
+                        av_packet_unref(audioPkt);
+                }
+        }
+        delete data;
 }
 
 void Encoder::loopStop(EncoderState state) {

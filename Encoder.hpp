@@ -87,9 +87,10 @@ public:
 private:
 	//function
 	void loopStop(EncoderState state);
-	void encodeVideoLoop(uint64_t nano);
-	bool encodeVideo(EncoderElement element);
-	void encodeAudioLoop();
+	void encodeVideoLoop(uint64_t nano, bool onlyVideo);
+	bool encodeVideoImpl(EncoderElement element);
+	void encodeAudioLoop(int fps, bool onlyAudio);
+	void encodeAudioImpl(EncoderElement element);	
 
 	//variables
 	void (*encStateCallback)(EncoderState);

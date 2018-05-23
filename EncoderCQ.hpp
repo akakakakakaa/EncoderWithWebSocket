@@ -37,7 +37,8 @@ private:
 	int front;
 	int rear;
 	int maxsize;
-	boost::mutex mutex;
+	boost::mutex enqueueMtx;
+	boost::mutex dequeueMtx;
 	boost::condition_variable cond;
 	EncoderElement* queue;
 	bool isStop;
